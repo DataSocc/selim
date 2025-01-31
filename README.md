@@ -1,7 +1,7 @@
 Option Explicit
 
 Public Sub ImportarSelicSemLibJson()
-    
+
     Dim ws As Worksheet
     Set ws = ThisWorkbook.Sheets("selic2")
     
@@ -36,6 +36,7 @@ Public Sub ImportarSelicSemLibJson()
         .Open "POST", _
               "https://www3.bcb.gov.br/novoselic/rest/taxaSelicApurada/pub/search?parametrosOrdenacao=%5B%5D&page=1&pageSize=999999999", _
               False
+        .setRequestHeader "Accept-Language", "pt-BR"   ' Exemplo: se precisar
         .setRequestHeader "Content-Type", "application/json"
         .send (postBody)
     End With
@@ -49,9 +50,6 @@ Public Sub ImportarSelicSemLibJson()
     '    - Procuramos por trechos como:
     '        "dataCotacao": "30/01/2025"
     '        "fatorDiario": 1.00049037
-    '    - Ignoramos outras chaves.
-    '    - Cada vez que achar "dataCotacao", pegamos a string seguinte.
-    '      Depois procuramos "fatorDiario" logo em seguida.
     '----------------------------------------------------------------------------
     
     Dim pos As Long
@@ -64,41 +62,46 @@ Public Sub ImportarSelicSemLibJson()
     countFound = 0
     
     Dim posDataCotacao As Long
+    Dim posColon As Long
     Dim posDataValueStart As Long, posDataValueEnd As Long
-    Dim txtDataCotacao As String
     
-    Dim posFator As Long
+    Dim txtDataCotacao As String
     Dim txtFator As String
     
-    ' Loop até não encontrar mais "dataCotacao":
+    Dim posFator As Long
+    Dim posFatorColon As Long
+    Dim posFatorValueStart As Long, posFatorValueEnd As Long
+    
     Do
         ' (a) Achar a próxima ocorrência de "dataCotacao":
         posDataCotacao = InStr(pos, jsonResponse, """dataCotacao"":", vbTextCompare)
-        If posDataCotacao = 0 Then Exit Do  ' acabou
+        If posDataCotacao = 0 Then Exit Do  ' não encontrou, paramos
         
-        '   Exemplo no JSON:
-        '   "dataCotacao": "30/01/2025"
-        '   Queremos pegar o texto entre as aspas após o :
+        ' Localiza o ':' após "dataCotacao"
+        posColon = InStr(posDataCotacao, jsonResponse, ":", vbTextCompare)
+        If posColon = 0 Then Exit Do
         
-        ' 1) Procurar a 1ª aspa (") depois de : 
-        posDataValueStart = InStr(posDataCotacao, jsonResponse, """", vbTextCompare)
+        ' Localiza as aspas que abrem a data
+        posDataValueStart = InStr(posColon, jsonResponse, """", vbTextCompare)
         If posDataValueStart = 0 Then Exit Do
         
-        ' 2) Procurar a 2ª aspa (") que fecha a string
+        ' Localiza as aspas que fecham a data
         posDataValueEnd = InStr(posDataValueStart + 1, jsonResponse, """", vbTextCompare)
         If posDataValueEnd = 0 Then Exit Do
         
-        ' 3) Extrair a substring
-        txtDataCotacao = Mid(jsonResponse, posDataValueStart + 1, posDataValueEnd - (posDataValueStart + 1))
+        txtDataCotacao = Mid(jsonResponse, posDataValueStart + 1, _
+                             posDataValueEnd - (posDataValueStart + 1))
         
-        ' (b) Agora procurar por "fatorDiario" após posDataValueEnd
+        ' (b) Procurar "fatorDiario" a partir de posDataValueEnd
         posFator = InStr(posDataValueEnd, jsonResponse, """fatorDiario"":", vbTextCompare)
         If posFator = 0 Then Exit Do
         
-        '   Exemplo no JSON:
-        '   "fatorDiario": 1.00049037
-        '   Precisamos pegar esse número até a próxima vírgula ou fecha-chaves
-        txtFator = ExtrairValorNumerico(jsonResponse, posFator + Len("""fatorDiario"":"))
+        posFatorColon = InStr(posFator, jsonResponse, ":", vbTextCompare)
+        If posFatorColon = 0 Then Exit Do
+        
+        ' Agora procuramos o número do fator (sem aspas), 
+        ' então chamamos a função auxiliar para extrair o valor numérico
+        txtFator = ExtrairValorNumerico(jsonResponse, posFatorColon + 1)
         
         ' (c) Preencher na planilha
         ws.Cells(rowOut, 1).Value = txtDataCotacao   ' DataCotacao (string)
@@ -112,32 +115,23 @@ Public Sub ImportarSelicSemLibJson()
         rowOut = rowOut + 1
         countFound = countFound + 1
         
-        ' Atualiza pos para próxima busca
-        pos = posDataValueEnd + 1
+        ' Avança 'pos' para procurar o próximo registro
+        pos = posFator + 1
+        
     Loop
     
     MsgBox "Processo concluído! " & countFound & " linhas inseridas.", vbInformation
-    
+
 End Sub
 
-'------------------------------------------------------------------------------
-' Função auxiliar que, dado um trecho do JSON e uma posição,
-' extrai um número (pode conter ponto ou vírgula decimal) até achar
-' algum caractere que não faça parte do número (vírgula, fecha-chaves etc.).
-'
-' Exemplo no JSON:
-'    "fatorDiario": 1.00049037,
-'
-' Chamamos: ExtrairValorNumerico(json, posDepoisDoDoisPontos)
-'
-' Ele ignora espaços e extrai "1.00049037".
-'
-' Obs: Se o JSON tiver formatação diferente, pode ser necessário ajustar.
-'------------------------------------------------------------------------------
+' ----------------------------------------------------------------------------
+' Função auxiliar que lê a partir de 'startPos' e extrai somente a parte
+' numérica (podendo ter ponto, vírgula ou sinal -), parando no primeiro char
+' inválido (por exemplo, ',', '}') 
+' ----------------------------------------------------------------------------
 Private Function ExtrairValorNumerico(ByVal source As String, ByVal startPos As Long) As String
-    
     Dim temp As String
-    temp = Mid(source, startPos, 50)  ' pega até 50 chars a partir de startPos, ajuste se precisar
+    temp = Mid(source, startPos, 50)  ' lê até 50 chars (ajuste se precisar)
     
     temp = LTrim(temp)               ' remove espaços à esquerda
     
@@ -148,18 +142,16 @@ Private Function ExtrairValorNumerico(ByVal source As String, ByVal startPos As 
     For i = 1 To Len(temp)
         ch = Mid(temp, i, 1)
         
-        ' Aceitamos dígitos 0-9, ponto (.) ou vírgula (,) e o sinal de menos, se houver
+        ' Aceitamos dígitos 0-9, ponto (.) ou vírgula (,) e '-' se for negativo
         If (ch Like "[0-9]") Or (ch = ".") Or (ch = ",") Or (ch = "-") Then
             ret = ret & ch
         Else
-            ' Paramos ao encontrar um caractere não aceito
             Exit For
         End If
     Next i
     
-    ' Substituir vírgula por ponto (caso apareça no JSON 1,234567)
+    ' Se houver vírgulas decimais, trocamos por ponto
     ret = Replace(ret, ",", ".")
     
     ExtrairValorNumerico = ret
-    
 End Function
